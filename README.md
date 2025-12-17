@@ -1,3 +1,4 @@
+![Go Sacco Logo](https://github.com/Vytek/gosacco/blob/main/logo_gosacco?raw=true)
 # gosacco
 Golang implementation secure system for Cloud
 
