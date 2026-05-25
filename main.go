@@ -75,20 +75,38 @@ func main() {
 	})
 	if err != nil {
 		slog.Fatalf("Errore nella connessione al DB: %v", err)
+	} else {
+		slog.Info("Connessione al DB avvenuta con successo!")
 	}
 
 	// 2. Auto-Migrazione
-	_ = db.AutoMigrate(&Category{}, &Document{}, &Metadata{})
+	if err := db.AutoMigrate(&Category{}, &Document{}, &Metadata{}); err != nil {
+		slog.Fatalf("Errore nella migrazione automatica: %v", err)
+	} else {
+		slog.Info("Migrazione automatica completata con successo!")
+	}
 
 	// 3. Creazione Albero Cartelle
 	root := Category{Title: "Archivio Centrale"}
-	_ = nestedset.Create(db, &root, nil)
+	if err := nestedset.Create(db, &root, nil); err != nil {
+		slog.Fatalf("Errore creazione nodo radice: %v", err)
+	} else {
+		slog.Info("Nodo radice creato con successo!")
+	}
 
 	itFolder := Category{Title: "Dipartimento IT"}
-	_ = nestedset.Create(db, &itFolder, &root)
+	if err := nestedset.Create(db, &itFolder, &root); err != nil {
+		slog.Fatalf("Errore creazione nodo IT: %v", err)
+	} else {
+		slog.Info("Nodo IT creato con successo!")
+	}
 
 	manualsFolder := Category{Title: "Manuali Tecnici"}
-	_ = nestedset.Create(db, &manualsFolder, &itFolder)
+	if err := nestedset.Create(db, &manualsFolder, &itFolder); err != nil {
+		slog.Fatalf("Errore creazione nodo Manuali Tecnici: %v", err)
+	} else {
+		slog.Info("Nodo Manuali Tecnici creato con successo!")
+	}
 
 	// ==========================================
 	// 4. PREPARAZIONE CONTENUTO E CALCOLO SHA256
