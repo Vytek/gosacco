@@ -258,6 +258,7 @@ func calculateFileSHA256(filePath string) (string, error) {
 
 // Funzione principale
 func main() {
+	// 0. Caricamento chiave master cloud
 	masterKey, err := loadMasterCloudKey()
 	if err != nil {
 		slog.Fatalf("Errore caricamento chiave master cloud: %v", err)
