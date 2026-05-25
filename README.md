@@ -1,6 +1,12 @@
 ![Go Sacco Logo](https://github.com/Vytek/gosacco/blob/main/logo_gosacco_mini.png?raw=true)
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Vytek/gosacco)
+
 # gosacco
 Golang implementation secure system for Cloud (The name is a play on words related to Go for Golang and Sacco which in Italian identifies the sack, but also a tribute to General Luigi Sacco who was one of the pioneers of cryptography in Italy https://it.wikipedia.org/wiki/Luigi_Sacco)
+
+## Motivation
+This repo seeks to implement what was described in the course: https://www.decifris.it/attivita/trends25
 
 ## Interesting links
 - https://github.com/fadeevab/cocoon (RUST)
