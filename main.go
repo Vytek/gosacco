@@ -311,8 +311,11 @@ func main() {
 	// 4. PREPARAZIONE CONTENUTO E CALCOLO SHA256
 	// ==========================================
 	docContent := "Contenuto riservato del manuale di sicurezza..."
+	// fileHash è lo SHA256 del contenuto, usato per la deduplica a livello di blob.
 	fileHash := calculateSHA256(docContent)
+	// filekeyArr è la chiave simmetrica derivata dallo SHA256 del contenuto, usata per la cifratura convergente e per la deduplica.
 	fileKeyArr := sha256.Sum256([]byte(docContent))
+	// fileKey è la chiave simmetrica di 32 byte usata per cifrare il contenuto e che sarà cifrata con la chiave nodo.
 	fileKey := fileKeyArr[:]
 
 	nodeKey, err := unwrapCategoryNodeKeyRecursive(db, manualsFolder.ID, masterKey)
