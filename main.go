@@ -318,21 +318,25 @@ func main() {
 	// fileKey è la chiave simmetrica di 32 byte usata per cifrare il contenuto e che sarà cifrata con la chiave nodo.
 	fileKey := fileKeyArr[:]
 
+	// nodeKey è la chiave nodo della categoria "Manuali Tecnici", ottenuta risolvendo ricorsivamente la catena di cifrature dal nodo radice.
 	nodeKey, err := unwrapCategoryNodeKeyRecursive(db, manualsFolder.ID, masterKey)
 	if err != nil {
 		slog.Fatalf("Errore risoluzione ricorsiva chiave nodo: %v", err)
 	}
 
+	// wrappedFileKey è la chiave simmetrica del file cifrata con la chiave nodo della categoria, da salvare nel documento.
 	wrappedFileKey, err := encryptRandomNonce(fileKey, nodeKey)
 	if err != nil {
 		slog.Fatalf("Errore cifratura chiave file con chiave nodo: %v", err)
 	}
 
+	// contentCipher è il contenuto cifrato con cifratura convergente, da salvare nel blob.
 	contentCipher, err := encryptConvergent([]byte(docContent), fileKey)
 	if err != nil {
 		slog.Fatalf("Errore cifratura convergente contenuto: %v", err)
 	}
 
+	// Controllo deduplica: cerco un blob con lo stesso hash del contenuto. Se non esiste, lo creo. Altrimenti, riuso il blob esistente.
 	var blob Blob
 	err = db.Where("content_hash = ?", fileHash).First(&blob).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -347,11 +351,13 @@ func main() {
 		slog.Info("Deduplica attiva: riuso blob esistente", "hash", fileHash, "blob_id", blob.ID)
 	}
 
+	// Cifratura dei metadati (incluso lo SHA256) con la chiave nodo della categoria.
 	plainMetadata := []Metadata{
 		{Key: "Autore", Value: "Mario Rossi"},
 		{Key: "Versione", Value: "2.1"},
 		{Key: "SHA256", Value: fileHash},
 	}
+	// encryptedMetadata è la versione cifrata dei metadati, da salvare nel documento.
 	encryptedMetadata, err := encryptMetadataForNode(plainMetadata, nodeKey)
 	if err != nil {
 		slog.Fatalf("Errore cifratura metadati con chiave nodo: %v", err)
