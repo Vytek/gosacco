@@ -6,10 +6,12 @@ require (
 	github.com/glebarez/sqlite v1.11.0
 	github.com/gookit/slog v0.6.0
 	github.com/longbridgeapp/nested-set v1.6.0
+	github.com/secure-io/siv-go v0.0.0-20180922214919-5ff40651e2c4
 	gorm.io/gorm v1.31.1
 )
 
 require (
+	github.com/aead/cmac v0.0.0-20160719120800-7af84192f0b1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect
 	github.com/google/uuid v1.3.0 // indirect
