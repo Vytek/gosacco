@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"os"
 
@@ -130,7 +129,7 @@ func main() {
 	if err := db.Create(&doc).Error; err != nil {
 		slog.Fatalf("Errore salvataggio documento: %v", err)
 	}
-	fmt.Println("✔ Documento e metadati (incluso SHA256) salvati!")
+	slog.Info("Documento e metadati (incluso SHA256) salvati")
 
 	// ==========================================
 	// 5. VERIFICA E STAMPA
@@ -138,15 +137,15 @@ func main() {
 	var fetchedDoc Document
 	db.Preload("Metadata").First(&fetchedDoc, doc.ID)
 
-	fmt.Printf("--- DETTAGLIO DOCUMENTO ---\n")
-	fmt.Printf("Titolo: %s\n", fetchedDoc.Title)
-	fmt.Println("Metadati associati:")
+	slog.Info("--- DETTAGLIO DOCUMENTO ---")
+	slog.Info("Titolo documento", "titolo", fetchedDoc.Title)
+	slog.Info("Metadati associati")
 	for _, m := range fetchedDoc.Metadata {
-		// Mettiamo in evidenza visiva lo SHA256 nella stampa
+		// Mettiamo in evidenza lo SHA256 nel logging strutturato
 		if m.Key == "SHA256" {
-			fmt.Printf("  ▶ %s: %s [VALIDO]\n", m.Key, m.Value)
+			slog.Info("Metadato", "chiave", m.Key, "valore", m.Value, "valido", true)
 		} else {
-			fmt.Printf("  - %s: %s\n", m.Key, m.Value)
+			slog.Info("Metadato", "chiave", m.Key, "valore", m.Value)
 		}
 	}
 }
