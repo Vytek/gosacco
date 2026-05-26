@@ -15,3 +15,65 @@ This repo seeks to implement what was described in the course: https://www.decif
   - https://github.com/safore-com/nested-set
 - https://medium.com/@tsegstech10/detecting-file-changes-in-golang-with-checksums-efe31ec66f51
 - https://github.com/glebarez/go-sqlite
+
+## RPC API with rpcx
+
+The application now starts an rpcx server and exposes remote APIs through the service `GoSacco`.
+
+### Run
+
+```bash
+go run .
+```
+
+Environment variables:
+
+- `RPCX_ADDR` (default: `0.0.0.0:8972`)
+- `GOSACCO_DB_PATH` (default: `gosacco.db`)
+- `CLOUD_MASTER_KEY_B64` (optional, base64 key of 32 bytes)
+
+### Exposed methods
+
+- `GoSacco.Health(*HealthArgs, *HealthReply)`
+- `GoSacco.CreateCategory(*CreateCategoryArgs, *CreateCategoryReply)`
+- `GoSacco.StoreDocument(*StoreDocumentArgs, *StoreDocumentReply)`
+- `GoSacco.GetDocument(*GetDocumentArgs, *GetDocumentReply)`
+
+### Example rpcx client
+
+```go
+package main
+
+import (
+  "context"
+  "fmt"
+
+  "github.com/smallnest/rpcx/client"
+)
+
+type HealthArgs struct{}
+
+type HealthReply struct {
+  AppName  string
+  Version  string
+  Status   string
+  UnixTime int64
+}
+
+func main() {
+  d, err := client.NewPeer2PeerDiscovery("tcp@127.0.0.1:8972", "")
+  if err != nil {
+    panic(err)
+  }
+  xclient := client.NewXClient("GoSacco", client.Failtry, client.RandomSelect, d, client.DefaultOption)
+  defer xclient.Close()
+
+  req := &HealthArgs{}
+  resp := &HealthReply{}
+  if err := xclient.Call(context.Background(), "Health", req, resp); err != nil {
+    panic(err)
+  }
+
+  fmt.Printf("%s %s status=%s\\n", resp.AppName, resp.Version, resp.Status)
+}
+```

@@ -1,24 +1,30 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"sort"
+	"sync"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/gookit/slog"
 	nestedset "github.com/longbridgeapp/nested-set"
 	siv "github.com/secure-io/siv-go"
+	"github.com/smallnest/rpcx/server"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
-const Version = "0.0.4"
+const Version = "0.0.5"
 const AppName = "GoSacco"
 
 // Category modella la gerarchia delle cartelle utilizzando il Nested Set Model
@@ -256,179 +262,295 @@ func calculateFileSHA256(filePath string) (string, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+type GoSaccoService struct {
+	db        *gorm.DB
+	masterKey []byte
+	mu        sync.Mutex
+}
+
+type HealthArgs struct{}
+
+type HealthReply struct {
+	AppName  string
+	Version  string
+	Status   string
+	UnixTime int64
+}
+
+type CreateCategoryArgs struct {
+	Title    string
+	ParentID int64
+}
+
+type CreateCategoryReply struct {
+	CategoryID int64
+}
+
+type StoreDocumentArgs struct {
+	Title      string
+	CategoryID int64
+	Content    string
+	Metadata   map[string]string
+}
+
+type StoreDocumentReply struct {
+	DocumentID   uint
+	BlobID       uint
+	ContentHash  string
+	Deduplicated bool
+}
+
+type GetDocumentArgs struct {
+	DocumentID uint
+}
+
+type GetDocumentReply struct {
+	DocumentID  uint
+	Title       string
+	CategoryID  int64
+	Content     string
+	ContentHash string
+	Metadata    map[string]string
+}
+
+func (s *GoSaccoService) Health(_ context.Context, _ *HealthArgs, reply *HealthReply) error {
+	*reply = HealthReply{
+		AppName:  AppName,
+		Version:  Version,
+		Status:   "ok",
+		UnixTime: time.Now().Unix(),
+	}
+	return nil
+}
+
+func (s *GoSaccoService) CreateCategory(_ context.Context, args *CreateCategoryArgs, reply *CreateCategoryReply) error {
+	if args.Title == "" {
+		return errors.New("title obbligatorio")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	category := Category{Title: args.Title}
+	var parent *Category
+	var parentKey []byte
+
+	if args.ParentID > 0 {
+		parent = &Category{}
+		if err := s.db.First(parent, args.ParentID).Error; err != nil {
+			return fmt.Errorf("parent category non trovata: %w", err)
+		}
+
+		key, err := unwrapCategoryNodeKeyRecursive(s.db, parent.ID, s.masterKey)
+		if err != nil {
+			return fmt.Errorf("impossibile risolvere la chiave nodo parent: %w", err)
+		}
+		parentKey = key
+	}
+
+	if _, err := createCategoryWithNodeKey(s.db, &category, parent, parentKey, s.masterKey); err != nil {
+		return fmt.Errorf("creazione categoria fallita: %w", err)
+	}
+
+	reply.CategoryID = category.ID
+	return nil
+}
+
+func (s *GoSaccoService) StoreDocument(_ context.Context, args *StoreDocumentArgs, reply *StoreDocumentReply) error {
+	if args.Title == "" {
+		return errors.New("title obbligatorio")
+	}
+	if args.CategoryID <= 0 {
+		return errors.New("category_id non valido")
+	}
+	if args.Content == "" {
+		return errors.New("content obbligatorio")
+	}
+
+	nodeKey, err := unwrapCategoryNodeKeyRecursive(s.db, args.CategoryID, s.masterKey)
+	if err != nil {
+		return fmt.Errorf("impossibile risolvere chiave categoria: %w", err)
+	}
+
+	fileHash := calculateSHA256(args.Content)
+	fileKeyArr := sha256.Sum256([]byte(args.Content))
+	fileKey := fileKeyArr[:]
+
+	wrappedFileKey, err := encryptRandomNonce(fileKey, nodeKey)
+	if err != nil {
+		return fmt.Errorf("errore cifratura chiave file: %w", err)
+	}
+
+	contentCipher, err := encryptConvergent([]byte(args.Content), fileKey)
+	if err != nil {
+		return fmt.Errorf("errore cifratura contenuto: %w", err)
+	}
+
+	plainMetadata := make([]Metadata, 0, len(args.Metadata)+1)
+	keys := make([]string, 0, len(args.Metadata))
+	for k := range args.Metadata {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		plainMetadata = append(plainMetadata, Metadata{Key: k, Value: args.Metadata[k]})
+	}
+	plainMetadata = append(plainMetadata, Metadata{Key: "SHA256", Value: fileHash})
+
+	encryptedMetadata, err := encryptMetadataForNode(plainMetadata, nodeKey)
+	if err != nil {
+		return fmt.Errorf("errore cifratura metadati: %w", err)
+	}
+
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	var blob Blob
+	err = tx.Where("content_hash = ?", fileHash).First(&blob).Error
+	deduplicated := false
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		blob = Blob{ContentHash: fileHash, Ciphertext: contentCipher}
+		if err := tx.Create(&blob).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("errore salvataggio blob: %w", err)
+		}
+	} else if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("errore ricerca blob: %w", err)
+	} else {
+		deduplicated = true
+	}
+
+	doc := Document{
+		Title:            args.Title,
+		BlobID:           blob.ID,
+		CategoryID:       args.CategoryID,
+		EncryptedFileKey: wrappedFileKey,
+		Metadata:         encryptedMetadata,
+	}
+
+	if err := tx.Create(&doc).Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("errore salvataggio documento: %w", err)
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return fmt.Errorf("errore commit transazione: %w", err)
+	}
+
+	reply.DocumentID = doc.ID
+	reply.BlobID = blob.ID
+	reply.ContentHash = fileHash
+	reply.Deduplicated = deduplicated
+	return nil
+}
+
+func (s *GoSaccoService) GetDocument(_ context.Context, args *GetDocumentArgs, reply *GetDocumentReply) error {
+	var doc Document
+	if err := s.db.Preload("Metadata").Preload("Blob").First(&doc, args.DocumentID).Error; err != nil {
+		return fmt.Errorf("documento non trovato: %w", err)
+	}
+
+	nodeKey, err := unwrapCategoryNodeKeyRecursive(s.db, doc.CategoryID, s.masterKey)
+	if err != nil {
+		return fmt.Errorf("errore risoluzione chiave categoria: %w", err)
+	}
+
+	fileKey, err := decryptRandomNonce(doc.EncryptedFileKey, nodeKey)
+	if err != nil {
+		return fmt.Errorf("errore decifratura file key: %w", err)
+	}
+
+	contentPlain, err := decryptConvergent(doc.Blob.Ciphertext, fileKey)
+	if err != nil {
+		return fmt.Errorf("errore decifratura contenuto: %w", err)
+	}
+
+	metadataPlain, err := decryptMetadataForNode(doc.Metadata, nodeKey)
+	if err != nil {
+		return fmt.Errorf("errore decifratura metadati: %w", err)
+	}
+
+	metadataMap := make(map[string]string, len(metadataPlain))
+	for _, m := range metadataPlain {
+		metadataMap[m.Key] = m.Value
+	}
+
+	reply.DocumentID = doc.ID
+	reply.Title = doc.Title
+	reply.CategoryID = doc.CategoryID
+	reply.Content = string(contentPlain)
+	reply.ContentHash = doc.Blob.ContentHash
+	reply.Metadata = metadataMap
+	return nil
+}
+
+func ensureRootCategory(db *gorm.DB, masterKey []byte) (Category, error) {
+	var root Category
+	err := db.Where("parent_id IS NULL").Order("id asc").First(&root).Error
+	if err == nil {
+		return root, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return Category{}, err
+	}
+
+	root = Category{Title: "Archivio Centrale"}
+	if _, err := createCategoryWithNodeKey(db, &root, nil, nil, masterKey); err != nil {
+		return Category{}, err
+	}
+	return root, nil
+}
+
 // Funzione principale
 func main() {
-	// 0. Caricamento chiave master cloud
 	masterKey, err := loadMasterCloudKey()
 	if err != nil {
 		slog.Fatalf("Errore caricamento chiave master cloud: %v", err)
 	}
 
-	// 1. Connessione al DB in memoria
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
-		// Nested-set interroga la tabella vuota al primo avvio: evitiamo il log "record not found" atteso.
+	dbPath := os.Getenv("GOSACCO_DB_PATH")
+	if dbPath == "" {
+		dbPath = "gosacco.db"
+	}
+
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
-		slog.Fatalf("Errore nella connessione al DB: %v", err)
-	} else {
-		slog.Info("Connessione al DB avvenuta con successo!")
+		slog.Fatalf("Errore connessione DB: %v", err)
 	}
 
-	// 2. Auto-Migrazione
 	if err := db.AutoMigrate(&Category{}, &Blob{}, &Document{}, &Metadata{}); err != nil {
-		slog.Fatalf("Errore nella migrazione automatica: %v", err)
-	} else {
-		slog.Info("Migrazione automatica completata con successo!")
+		slog.Fatalf("Errore migrazione DB: %v", err)
 	}
 
-	// 3. Creazione Albero Cartelle
-	root := Category{Title: "Archivio Centrale"}
-	rootKey, err := createCategoryWithNodeKey(db, &root, nil, nil, masterKey)
+	root, err := ensureRootCategory(db, masterKey)
 	if err != nil {
-		slog.Fatalf("Errore creazione nodo radice: %v", err)
-	} else {
-		slog.Info("Nodo radice creato con successo!")
+		slog.Fatalf("Errore inizializzazione categoria root: %v", err)
+	}
+	slog.Info("Categoria root pronta", "id", root.ID, "title", root.Title)
+
+	rpcService := &GoSaccoService{db: db, masterKey: masterKey}
+	rpcServer := server.NewServer()
+	if err := rpcServer.RegisterName("GoSacco", rpcService, ""); err != nil {
+		slog.Fatalf("Errore registrazione servizio rpcx: %v", err)
 	}
 
-	itFolder := Category{Title: "Dipartimento IT"}
-	itKey, err := createCategoryWithNodeKey(db, &itFolder, &root, rootKey, masterKey)
-	if err != nil {
-		slog.Fatalf("Errore creazione nodo IT: %v", err)
-	} else {
-		slog.Info("Nodo IT creato con successo!")
+	addr := os.Getenv("RPCX_ADDR")
+	if addr == "" {
+		addr = "0.0.0.0:8972"
 	}
 
-	manualsFolder := Category{Title: "Manuali Tecnici"}
-	_, err = createCategoryWithNodeKey(db, &manualsFolder, &itFolder, itKey, masterKey)
-	if err != nil {
-		slog.Fatalf("Errore creazione nodo Manuali Tecnici: %v", err)
-	} else {
-		slog.Info("Nodo Manuali Tecnici creato con successo!")
-	}
-
-	// ==========================================
-	// 4. PREPARAZIONE CONTENUTO E CALCOLO SHA256
-	// ==========================================
-	docContent := "Contenuto riservato del manuale di sicurezza..."
-	// fileHash è lo SHA256 del contenuto, usato per la deduplica a livello di blob.
-	fileHash := calculateSHA256(docContent)
-	// filekeyArr è la chiave simmetrica derivata dallo SHA256 del contenuto, usata per la cifratura convergente e per la deduplica.
-	fileKeyArr := sha256.Sum256([]byte(docContent))
-	// fileKey è la chiave simmetrica di 32 byte usata per cifrare il contenuto e che sarà cifrata con la chiave nodo.
-	fileKey := fileKeyArr[:]
-
-	// nodeKey è la chiave nodo della categoria "Manuali Tecnici", ottenuta risolvendo ricorsivamente la catena di cifrature dal nodo radice.
-	nodeKey, err := unwrapCategoryNodeKeyRecursive(db, manualsFolder.ID, masterKey)
-	if err != nil {
-		slog.Fatalf("Errore risoluzione ricorsiva chiave nodo: %v", err)
-	}
-
-	// wrappedFileKey è la chiave simmetrica del file cifrata con la chiave nodo della categoria, da salvare nel documento.
-	wrappedFileKey, err := encryptRandomNonce(fileKey, nodeKey)
-	if err != nil {
-		slog.Fatalf("Errore cifratura chiave file con chiave nodo: %v", err)
-	}
-
-	// contentCipher è il contenuto cifrato con cifratura convergente, da salvare nel blob.
-	contentCipher, err := encryptConvergent([]byte(docContent), fileKey)
-	if err != nil {
-		slog.Fatalf("Errore cifratura convergente contenuto: %v", err)
-	}
-
-	// Controllo deduplica: cerco un blob con lo stesso hash del contenuto. Se non esiste, lo creo. Altrimenti, riuso il blob esistente.
-	var blob Blob
-	err = db.Where("content_hash = ?", fileHash).First(&blob).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		blob = Blob{ContentHash: fileHash, Ciphertext: contentCipher}
-		if err := db.Create(&blob).Error; err != nil {
-			slog.Fatalf("Errore salvataggio blob deduplicato: %v", err)
-		}
-		slog.Info("Nuovo blob cifrato salvato", "hash", fileHash)
-	} else if err != nil {
-		slog.Fatalf("Errore ricerca blob deduplicato: %v", err)
-	} else {
-		slog.Info("Deduplica attiva: riuso blob esistente", "hash", fileHash, "blob_id", blob.ID)
-	}
-
-	// Cifratura dei metadati (incluso lo SHA256) con la chiave nodo della categoria.
-	plainMetadata := []Metadata{
-		{Key: "Autore", Value: "Mario Rossi"},
-		{Key: "Versione", Value: "2.1"},
-		{Key: "SHA256", Value: fileHash},
-	}
-	// encryptedMetadata è la versione cifrata dei metadati, da salvare nel documento.
-	encryptedMetadata, err := encryptMetadataForNode(plainMetadata, nodeKey)
-	if err != nil {
-		slog.Fatalf("Errore cifratura metadati con chiave nodo: %v", err)
-	}
-
-	doc := Document{
-		Title:            "Manuale Sicurezza Rete 2026",
-		BlobID:           blob.ID,
-		CategoryID:       manualsFolder.ID,
-		EncryptedFileKey: wrappedFileKey,
-		Metadata:         encryptedMetadata,
-	}
-
-	// Salvataggio
-	if err := db.Create(&doc).Error; err != nil {
-		slog.Fatalf("Errore salvataggio documento: %v", err)
-	}
-	slog.Info("Documento e metadati (incluso SHA256) salvati")
-
-	// Dimostrazione deduplica: stesso contenuto, nuovo documento, stesso blob.
-	doc2 := Document{
-		Title:            "Copia Manuale Sicurezza Rete 2026",
-		BlobID:           blob.ID,
-		CategoryID:       manualsFolder.ID,
-		EncryptedFileKey: wrappedFileKey,
-		Metadata:         encryptedMetadata,
-	}
-	if err := db.Create(&doc2).Error; err != nil {
-		slog.Fatalf("Errore salvataggio secondo documento deduplicato: %v", err)
-	}
-	slog.Info("Secondo documento salvato senza duplicare il blob", "blob_id", blob.ID)
-
-	// ==========================================
-	// 5. VERIFICA E STAMPA
-	// ==========================================
-	var fetchedDoc Document
-	if err := db.Preload("Metadata").Preload("Blob").First(&fetchedDoc, doc.ID).Error; err != nil {
-		slog.Fatalf("Errore fetch documento: %v", err)
-	}
-
-	nodeKeyForRead, err := unwrapCategoryNodeKeyRecursive(db, fetchedDoc.CategoryID, masterKey)
-	if err != nil {
-		slog.Fatalf("Errore risoluzione chiave nodo in lettura: %v", err)
-	}
-
-	unwrappedFileKey, err := decryptRandomNonce(fetchedDoc.EncryptedFileKey, nodeKeyForRead)
-	if err != nil {
-		slog.Fatalf("Errore decifratura chiave file: %v", err)
-	}
-
-	decryptedContent, err := decryptConvergent(fetchedDoc.Blob.Ciphertext, unwrappedFileKey)
-	if err != nil {
-		slog.Fatalf("Errore decifratura contenuto blob: %v", err)
-	}
-
-	decryptedMetadata, err := decryptMetadataForNode(fetchedDoc.Metadata, nodeKeyForRead)
-	if err != nil {
-		slog.Fatalf("Errore decifratura metadati: %v", err)
-	}
-
-	slog.Info("--- DETTAGLIO DOCUMENTO ---")
-	slog.Info("Titolo documento", "titolo", fetchedDoc.Title)
-	slog.Info("Blob associato", "blob_id", fetchedDoc.BlobID, "content_hash", fetchedDoc.Blob.ContentHash)
-	slog.Info("Contenuto decifrato", "contenuto", string(decryptedContent))
-	slog.Info("Metadati associati")
-	for _, m := range decryptedMetadata {
-		// Mettiamo in evidenza lo SHA256 nel logging strutturato
-		if m.Key == "SHA256" {
-			slog.Info("Metadato", "chiave", m.Key, "valore", m.Value, "valido", true)
-		} else {
-			slog.Info("Metadato", "chiave", m.Key, "valore", m.Value)
-		}
+	slog.Info("Server rpcx avviato", "service", "GoSacco", "addr", addr)
+	if err := rpcServer.Serve("tcp", addr); err != nil {
+		slog.Fatalf("Errore avvio server rpcx: %v", err)
 	}
 }
