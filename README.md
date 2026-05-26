@@ -22,6 +22,11 @@ This repo seeks to implement what was described in the course: https://www.decif
   - [CP-ABE using GPSW in Go](https://asecuritysite.com/golang/go_abe03)
   - [CP-ABE using MAABE (Multi-authority (MA) attribute based encryption) in Go](https://asecuritysite.com/golang/go_abe04)
   - [CP-ABE with DIPPE (Decentralized Inner-Product Predicate Encryption) in Go](https://asecuritysite.com/golang/go_abe05)
+  - [CP-ABE (Cipher Policy - Attributed-Based Encryption) with Kryptology](https://asecuritysite.com/golang/cp_abe)
+- [CIRCL: Cloudflare Interoperable Reusable Cryptographic Library](https://github.com/cloudflare/circl)
+  - [MLKEM](https://blog.moeghifar.com/post-quantum-key-encapsulation-ml-kem-performance-benchmark-between-go-library-and-cloudflare-006df9f759e1)
+- [🐿️ A pure golang implementation of TFHE Fully Homomorphic Encryption Scheme](https://github.com/thedonutfactory/go-tfhe)
+- [A library for lattice-based multiparty homomorphic encryption in Go](https://github.com/tuneinsight/lattigo)
 
 ## RPC API with rpcx
 
