@@ -15,7 +15,7 @@ This repo seeks to implement what was described in the course: https://www.decif
   - https://github.com/safore-com/nested-set
 - https://medium.com/@tsegstech10/detecting-file-changes-in-golang-with-checksums-efe31ec66f51
 - https://github.com/glebarez/go-sqlite
-- https://github.com/fentec-project/gofe
+- [Functional encryption library in Go](https://github.com/fentec-project/gofe)
   - https://github.com/asvin-io/gofe-examples
   - [CP-ABE in Go](https://asecuritysite.com/golang/go_abe)
   - [CP-ABE using GPSW with String Attributes in Go](https://asecuritysite.com/golang/go_abe02)
