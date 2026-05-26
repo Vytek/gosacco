@@ -53,6 +53,7 @@ package main
 
 import (
   "context"
+  "encoding/json"
   "fmt"
 
   "github.com/smallnest/rpcx/client"
@@ -65,6 +66,42 @@ type HealthReply struct {
   Version  string
   Status   string
   UnixTime int64
+}
+
+type CreateCategoryArgs struct {
+  Title    string
+  ParentID int64
+}
+
+type CreateCategoryReply struct {
+  CategoryID int64
+}
+
+type StoreDocumentArgs struct {
+  Title      string
+  CategoryID int64
+  Content    string
+  Metadata   map[string]string
+}
+
+type StoreDocumentReply struct {
+  DocumentID   uint
+  BlobID       uint
+  ContentHash  string
+  Deduplicated bool
+}
+
+type GetDocumentArgs struct {
+  DocumentID uint
+}
+
+type GetDocumentReply struct {
+  DocumentID  uint
+  Title       string
+  CategoryID  int64
+  Content     string
+  ContentHash string
+  Metadata    map[string]string
 }
 
 func main() {
@@ -80,7 +117,38 @@ func main() {
   if err := xclient.Call(context.Background(), "Health", req, resp); err != nil {
     panic(err)
   }
-
   fmt.Printf("%s %s status=%s\\n", resp.AppName, resp.Version, resp.Status)
+
+  // Root category is created at startup and has ID 1 in a fresh database.
+  createCatReq := &CreateCategoryArgs{Title: "Documenti Demo", ParentID: 1}
+  createCatResp := &CreateCategoryReply{}
+  if err := xclient.Call(context.Background(), "CreateCategory", createCatReq, createCatResp); err != nil {
+    panic(err)
+  }
+  fmt.Printf("Created category id=%d\\n", createCatResp.CategoryID)
+
+  storeReq := &StoreDocumentArgs{
+    Title:      "nota.txt",
+    CategoryID: createCatResp.CategoryID,
+    Content:    "Contenuto riservato di esempio",
+    Metadata: map[string]string{
+      "owner": "alice",
+      "scope": "demo",
+    },
+  }
+  storeResp := &StoreDocumentReply{}
+  if err := xclient.Call(context.Background(), "StoreDocument", storeReq, storeResp); err != nil {
+    panic(err)
+  }
+  fmt.Printf("Stored document id=%d hash=%s dedup=%v\\n", storeResp.DocumentID, storeResp.ContentHash, storeResp.Deduplicated)
+
+  getReq := &GetDocumentArgs{DocumentID: storeResp.DocumentID}
+  getResp := &GetDocumentReply{}
+  if err := xclient.Call(context.Background(), "GetDocument", getReq, getResp); err != nil {
+    panic(err)
+  }
+
+  pretty, _ := json.MarshalIndent(getResp, "", "  ")
+  fmt.Println(string(pretty))
 }
 ```
