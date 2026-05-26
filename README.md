@@ -61,6 +61,7 @@ import (
   "encoding/json"
   "fmt"
 
+  "github.com/gookit/slog"
   "github.com/smallnest/rpcx/client"
 )
 
@@ -154,6 +155,6 @@ func main() {
   }
 
   pretty, _ := json.MarshalIndent(getResp, "", "  ")
-  fmt.Println(string(pretty))
+  slog.Infof("%s", string(pretty))
 }
 ```
